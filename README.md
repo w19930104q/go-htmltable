@@ -119,9 +119,75 @@ am4Chipsets, _ := htmltable.NewSliceFromURL[AM4]("https://en.wikipedia.org/wiki/
 fmt.Println(am4Chipsets[2].Model)
 fmt.Println(am4Chipsets[2].SupportZen2)
 
-// Output:
+// Output: 
 // X370
 // Varies[c]
+```
+
+### Strict decoding
+
+The `NewSlice*` constructors stay lenient for backwards compatibility: unknown
+boolean text becomes `false` and short rows are skipped. When a table feeds a
+typed data pipeline where silent coercion is unacceptable, opt in to the
+strict constructors instead: `NewStrictSlice`, `NewStrictSliceFromString`,
+`NewStrictSliceFromResponse`, `NewStrictSliceFromURL` and
+`NewStrictSliceFromPage`.
+
+Strict decoding adds:
+
+- **anonymous embedded structs**, both value and pointer embeds (nil pointer
+  embeds are allocated on demand), with dotted field paths such as `Base.Name`
+  in diagnostics;
+- **nullable pointer fields** — an empty cell leaves the pointer as `nil`,
+  otherwise the pointed-to value is parsed;
+- types implementing `encoding.TextUnmarshaler` (e.g. `time.Time`), including
+  pointer fields;
+- all integer kinds (signed and unsigned, every width), floats and strings,
+  with numeric overflow reported via `strconv.ErrRange`;
+- **strict booleans**: only the values accepted by `strconv.ParseBool`
+  (`1, t, T, TRUE, true, True, 0, f, F, FALSE, false, False`) are valid;
+- structural rejection, before any row is processed, of non-struct target
+  types, unwritable fields, unsupported field types, duplicate `header` tags,
+  duplicate table headers, missing columns and ambiguous matching tables;
+- a guarantee that no failure path panics — panics inside a custom
+  `UnmarshalText` are recovered and reported as cell errors.
+
+Every conversion failure across all rows is collected into a
+`*htmltable.DecodeError` whose `Errors` are ordered by row, then by column.
+Each `*htmltable.CellError` carries the zero-based row and column, the table
+header, the struct field path, the original cell text and the wrapped
+conversion error. On any error the returned slice is `nil` — partial results
+are never delivered. Underlying I/O and HTML parse errors are returned
+unchanged.
+
+```go
+type Row struct {
+    Name   string `header:"Name"`
+    Active bool   `header:"Active"`
+    Count  int    `header:"Count"`
+}
+
+out, err := htmltable.NewStrictSliceFromString[Row](`
+<table>
+  <tr><th>Name</th><th>Active</th><th>Count</th></tr>
+  <tr><td>alpha</td><td>true</td><td>10</td></tr>
+  <tr><td>beta</td><td>yes</td><td>20</td></tr>
+  <tr><td>gamma</td><td>false</td><td>many</td></tr>
+</table>`)
+
+var de *htmltable.DecodeError
+if errors.As(err, &de) {
+    fmt.Println(out == nil) // true: no partial results
+    for _, ce := range de.Errors {
+        fmt.Printf("row %d col %d %s: %q failed: %v\n",
+            ce.Row, ce.Column, ce.Field, ce.Value, ce.Err)
+    }
+}
+
+// Output:
+// true
+// row 1 col 1 Active: "yes" failed: strconv.ParseBool: parsing "yes": invalid syntax
+// row 2 col 2 Count: "many" failed: strconv.ParseInt: parsing "many": invalid syntax
 ```
 
 And the last note: you're encouraged to plug your own structured logger:
